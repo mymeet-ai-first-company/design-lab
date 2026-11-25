@@ -338,6 +338,25 @@ body {
   .gc-enter { animation: none; }
 }
 
+/* global-chat — отправленное сообщение: та же кривая, что у gc-enter, но заметнее — пузырь приходит
+   снизу, со стороны поля ввода, и дорастает из правого нижнего угла, к которому прижат.
+   Не с нуля: scale 0.96 + 8px, чтобы «отправилось», а не «выпрыгнуло» */
+@keyframes gc-sent-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.96); }
+  to   { opacity: 1; transform: none; }
+}
+.gc-enter-sent {
+  transform-origin: 100% 100%;
+  animation: gc-sent-in 260ms cubic-bezier(0.23, 1, 0.32, 1) backwards;
+}
+@keyframes gc-sent-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gc-enter-sent { animation: gc-sent-fade 160ms ease-out backwards; }
+}
+
 /* global-chat — лента диалога скроллится без видимого скроллбара */
 .gc-noscroll {
   scrollbar-width: none;

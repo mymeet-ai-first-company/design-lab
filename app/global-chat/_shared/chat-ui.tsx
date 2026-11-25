@@ -297,9 +297,13 @@ export function ModeAvatar({
     target.addEventListener("mouseenter", play);
     // Первый заход: персонаж сам здоровается, когда заголовок уже появился
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // Флаг ставим только когда сценка реально стартовала: в StrictMode эффект запускается дважды,
+    // и флаг, выставленный сразу, глушил автозапуск — первый таймер отменялся, второй уже не ставился
     if (autoplayOnce && !titleAutoplayed) {
-      titleAutoplayed = true;
-      timer = setTimeout(play, 500);
+      timer = setTimeout(() => {
+        titleAutoplayed = true;
+        play();
+      }, 500);
     }
     return () => {
       target.removeEventListener("mouseenter", play);
@@ -1255,6 +1259,24 @@ const ROW_STAGGER = 0.025;
 /** Сколько аватар ответа стоит напротив готового ответа перед тем, как исчезнуть */
 const AVATAR_LINGER_MS = 5000;
 
+const PREVIOUS_EXPANDED_KEY = "gc-previous-chats-expanded";
+
+function readPreviousExpanded() {
+  try {
+    return typeof window !== "undefined" && window.localStorage.getItem(PREVIOUS_EXPANDED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writePreviousExpanded(value: boolean) {
+  try {
+    window.localStorage.setItem(PREVIOUS_EXPANDED_KEY, value ? "1" : "0");
+  } catch {
+    // без хранилища выбор просто не переживет перезагрузку
+  }
+}
+
 /**
  * Блок «Предыдущие чаты» на стартовой — по макету 46115:7088: заголовок серым (px-8), через 12px список строк 36px.
  * Если диалогов больше трех — показываем три и ссылку «Показать все», в раскрытом виде — «Свернуть»
@@ -1277,7 +1299,8 @@ export function PreviousChats({
   /** Диалог, в котором сейчас идет ответ — у его строки «В процессе» */
   generatingId?: string | null;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  // Выбор «Показать все» запоминаем: раз развернул — список так и открывается дальше, пока сам не нажмет «Свернуть»
+  const [expanded, setExpanded] = useState(readPreviousExpanded);
   // Строки, у которых закончился вход: до этого они обрезаны по высоте, после — overflow снова видимый (меню «…» выходит за строку)
   const [settled, setSettled] = useState<Set<string>>(() => new Set());
   const reduce = useReducedMotion();
@@ -1288,7 +1311,9 @@ export function PreviousChats({
   // Когда выше растет поле ввода, список должен сдвигаться мгновенно, без догоняющей анимации
   const orderKey = visible.map((d) => d.id).join("|");
   const toggleExpanded = () => {
-    setExpanded((v) => !v);
+    const next = !expanded;
+    setExpanded(next);
+    writePreviousExpanded(next);
     setSettled(new Set());
   };
   return (
@@ -2000,7 +2025,7 @@ function RenameInput({ title, onCommit, onCancel }: { title: string; onCommit: (
 
 export function UserBubble({ message }: { message: Message }) {
   return (
-    <div className="gc-enter flex w-full flex-col items-end gap-[8px]">
+    <div className="gc-enter-sent flex w-full flex-col items-end gap-[8px]">
       {/* Приложенные файлы (46753:8155): те же чипы, что в поле, над пузырем по правому краю */}
       {message.files?.map((f) => <FileChip key={f.id} file={f} />)}
       <div className="max-w-[560px] whitespace-pre-wrap rounded-[4px] p-[8px] text-[13px] leading-[20px] tracking-[-0.13px]" style={{ backgroundColor: tokens.bgSubtle, color: tokens.black }}>
@@ -2290,16 +2315,18 @@ export function AnswerText({ text, sources = [], web, onOpenLink }: { text: stri
 
 /** Шаг «Смотрю встречи…»: клик раскрывает список просмотренных встреч */
 /** Подпись шага по фазе (46738:7497 / 7646 / 7840): ищем → анализируем → посмотрели */
+// Статусов два типа: размышление («Думаю» → «Думал N сек») и поиск. Поиск по встречам — один статус на весь шаг,
+// без промежуточных «Ищу подходящие» / «Анализирую»: пользователю важно, что агент смотрит встречи, а не его внутренние фазы
 const STEP_LABEL: Record<"looking" | "analyzing" | "done", string> = {
-  looking: "Ищу подходящие встречи",
-  analyzing: "Анализирую встречи",
+  looking: "Смотрю встречи",
+  analyzing: "Смотрю встречи",
   done: "Посмотрел встречи",
 };
 
-function StepRow({ step, phase, accent, web, onOpenMeeting, onOpenLink }: { step: NonNullable<Message["step"]>; phase: "looking" | "analyzing" | "done"; /** акцент, пока аватар стоит напротив шага */ accent?: string; /** источники из интернета вместо встреч (46761:8022) */ web?: WebSource[]; onOpenMeeting?: (id: string) => void; onOpenLink?: (title: string) => void }) {
-  const readOnly = useContext(ReadOnlyContext);
+function StepRow({ step, phase, accent, web, seconds, onOpenMeeting, onOpenLink }: { step: NonNullable<Message["step"]>; phase: "looking" | "analyzing" | "done"; /** свой таймер этапа поиска, считает с нуля */ seconds?: number; /** акцент, пока аватар стоит напротив шага */ accent?: string; /** источники из интернета вместо встреч (46761:8022) */ web?: WebSource[]; onOpenMeeting?: (id: string) => void; onOpenLink?: (title: string) => void }) {
   const looking = phase !== "done";
-  const label = web ? (looking ? "Ищу в интернете" : "Поискал в интернете") : STEP_LABEL[phase];
+  const baseLabel = web ? (looking ? "Ищу в интернете" : "Поискал в интернете") : STEP_LABEL[phase];
+  const label = looking && seconds ? `${baseLabel} ${seconds} сек...` : baseLabel;
   const [open, setOpen] = useState(false);
   const labelRef = useRef<HTMLSpanElement>(null);
   const [labelWidth, setLabelWidth] = useState<number | null>(null);
@@ -2308,7 +2335,7 @@ function StepRow({ step, phase, accent, web, onOpenMeeting, onOpenLink }: { step
     if (!looking) return;
     const el = labelRef.current;
     if (el) setLabelWidth(el.getBoundingClientRect().width);
-  }, [looking, phase]);
+  }, [looking, phase, label]);
   const shimmer = looking && labelWidth !== null;
   return (
     <div className="flex w-full flex-col gap-[16px]">
@@ -2335,75 +2362,142 @@ function StepRow({ step, phase, accent, web, onOpenMeeting, onOpenLink }: { step
           <Ic name="chevron-right" color={shimmer ? "transparent" : undefined} className={shimmer ? "gc-shimmer-run-icon" : ""} />
         </span>
       </button>
+      {open && <StepSources step={step} web={web} onOpenMeeting={onOpenMeeting} onOpenLink={onOpenLink} />}
+    </div>
+  );
+}
+
+
+
+/** Строка «Готово · N сек» с шевроном — свернутые этапы работы над ответом */
+function WorkToggle({ seconds, open, onToggle }: { seconds: number; open: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-expanded={open}
+      onClick={onToggle}
+      className={`group flex w-fit items-center gap-[2px] rounded-[2px] text-left ${pressableClass} ${focusRingClass}`}
+    >
+      <span className="text-[13px] leading-[20px] tracking-[-0.13px] text-[#818AA3] group-hover:text-[#585E6C]">Готово · {seconds} сек</span>
+      <span
+        className={`flex h-[16px] w-[16px] translate-y-[1px] items-center justify-center text-[#818AA3] transition-transform duration-[180ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover:text-[#585E6C] motion-reduce:transition-none ${open ? "rotate-90" : ""}`}
+      >
+        <Ic name="chevron-right" />
+      </span>
+    </button>
+  );
+}
+
+/** Раскрытые этапы под «Готово»: сколько думал и что посмотрел. Раскрывается по высоте с проявлением,
+ *  сворачивается быстрее, чем раскрывается — система отвечает, ждать нечего */
+function WorkPanel({ open, thoughtSec, lookSec, step, web, onOpenMeeting, onOpenLink }: { open: boolean; thoughtSec?: number; /** сколько шел поиск — вместе с думаньем дает итог в «Готово» */ lookSec?: number; step?: Message["step"]; web?: WebSource[]; onOpenMeeting?: (id: string) => void; onOpenLink?: (title: string) => void }) {
+  const reduce = useReducedMotion();
+  const stageClass = "text-[13px] leading-[20px] tracking-[-0.13px]";
+  return (
+    <AnimatePresence initial={false}>
       {open && (
-        <div className="gc-enter flex w-full flex-col rounded-[4px] border p-[8px]" style={{ borderColor: tokens.border }}>
-          {web?.map((w) => (
-            <button
-              key={w.title}
-              type="button"
-              onClick={() => onOpenLink?.(w.title)}
-              className={`group/row flex w-full items-center gap-[6px] rounded-[2px] px-[8px] py-[8px] text-left hover:bg-[#F7F7F8] ${pressableClass} ${focusRingClass}`}
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={gcAsset(w.favicon)} alt="" className="h-[16px] w-[16px] shrink-0 object-contain" />
-              <span className="min-w-0 flex-1 truncate text-[13px] leading-[normal] tracking-[-0.13px]" style={{ color: tokens.black }}>
-                {w.title}
+        <motion.div
+          key="stages"
+          className="w-full overflow-hidden"
+          initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
+          animate={{ height: "auto", opacity: 1, transition: reduce ? { duration: 0.12 } : { height: { duration: 0.22, ease: easeOut }, opacity: { duration: 0.16, delay: 0.04, ease: easeOut } } }}
+          exit={reduce ? { opacity: 0, transition: { duration: 0.1 } } : { height: 0, opacity: 0, transition: { height: { duration: 0.16, ease: easeOut }, opacity: { duration: 0.08 } } }}
+        >
+          {/* отступ от «Готово» — паддингом внутри, чтобы при сворачивании не было прыжка в конце */}
+          <div className="flex w-full flex-col gap-[12px] pt-[12px]">
+            {thoughtSec !== undefined && (
+              <span className={stageClass} style={{ color: tokens.grey }}>
+                Думал {thoughtSec} сек
               </span>
-              <span className="relative flex h-[16px] shrink-0 items-center justify-end">
-                <span
-                  className="whitespace-nowrap text-[12px] leading-[normal] tracking-[-0.24px] transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-0 motion-reduce:transition-none"
-                  style={{ color: tokens.greyDisabled }}
-                >
-                  {w.domain}
+            )}
+            {step && (
+              <div className="flex w-full flex-col gap-[8px]">
+                <span className={stageClass} style={{ color: tokens.grey }}>
+                  {/* Панель — разбивка итога из «Готово»: у каждого этапа свои секунды. С длительностью — несовершенный вид:
+                      «Смотрел встречи 3 сек», как «Думал 3 сек» */}
+                  {web ? "Искал в интернете" : "Смотрел встречи"}
+                  {lookSec ? ` ${lookSec} сек` : ""}
                 </span>
-                <span
-                  className="absolute right-0 flex rotate-90 opacity-0 transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-100 motion-reduce:transition-none"
-                  style={{ color: tokens.grey }}
-                  aria-hidden="true"
-                >
-                  <Ic name="fig-arrow-out" />
-                </span>
-              </span>
-            </button>
-          ))}
-          {step.meetingIds.map((id) => {
-            const m = meetingById(id);
-            if (!m) return null;
-            // У гостя строка встречи — просто строка: без ховера, стрелки и перехода
-            const Row = readOnly ? "div" : "button";
-            return (
-              <Row
-                key={id}
-                {...(readOnly ? {} : { type: "button" as const, onClick: () => onOpenMeeting?.(id) })}
-                className={readOnly ? "flex w-full items-center gap-[6px] rounded-[2px] px-[8px] py-[8px] text-left" : `group/row flex w-full items-center gap-[6px] rounded-[2px] px-[8px] py-[8px] text-left hover:bg-[#F7F7F8] ${pressableClass} ${focusRingClass}`}
-              >
-                <MeetingThumb thumb={m.thumb} width={26} height={16} radius={2} plain />
-                <span className="min-w-0 flex-1 truncate text-[13px] leading-[normal] tracking-[-0.13px]" style={{ color: tokens.black }}>
-                  {m.title}
-                </span>
-                {/* Дата и стрелка перехода стоят на одном месте, как в карточке цитаты: на ховере строки дата гаснет, стрелка проявляется */}
-                <span className="relative flex h-[16px] shrink-0 items-center justify-end">
-                  <span
-                    className="whitespace-nowrap text-[12px] leading-[normal] tracking-[-0.24px] transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-0 motion-reduce:transition-none"
-                    style={{ color: tokens.greyDisabled }}
-                  >
-                    {formatLongDate(m.date)}
-                  </span>
-                  {!readOnly && (
-                  <span
-                    className="absolute right-0 flex rotate-90 opacity-0 transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-100 motion-reduce:transition-none"
-                    style={{ color: tokens.grey }}
-                    aria-hidden="true"
-                  >
-                    <Ic name="fig-arrow-out" />
-                  </span>
-                  )}
-                </span>
-              </Row>
-            );
-          })}
-        </div>
+                <StepSources step={step} web={web} onOpenMeeting={onOpenMeeting} onOpenLink={onOpenLink} enter={false} />
+              </div>
+            )}
+          </div>
+        </motion.div>
       )}
+    </AnimatePresence>
+  );
+}
+
+/** Что агент нашел на шаге: встречи (или источники из интернета) в рамке, строка ведет на встречу */
+function StepSources({ step, web, onOpenMeeting, onOpenLink, enter = true }: { step: NonNullable<Message["step"]>; web?: WebSource[]; onOpenMeeting?: (id: string) => void; onOpenLink?: (title: string) => void; /** своя анимация входа; внутри панели, которая сама раскрывается, — без нее */ enter?: boolean }) {
+  const readOnly = useContext(ReadOnlyContext);
+  return (
+    <div className={`${enter ? "gc-enter " : ""}flex w-full flex-col rounded-[4px] border p-[8px]`} style={{ borderColor: tokens.border }}>
+      {web?.map((w) => (
+        <button
+          key={w.title}
+          type="button"
+          onClick={() => onOpenLink?.(w.title)}
+          className={`group/row flex w-full items-center gap-[6px] rounded-[2px] px-[8px] py-[8px] text-left hover:bg-[#F7F7F8] ${pressableClass} ${focusRingClass}`}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={gcAsset(w.favicon)} alt="" className="h-[16px] w-[16px] shrink-0 object-contain" />
+          <span className="min-w-0 flex-1 truncate text-[13px] leading-[normal] tracking-[-0.13px]" style={{ color: tokens.black }}>
+            {w.title}
+          </span>
+          <span className="relative flex h-[16px] shrink-0 items-center justify-end">
+            <span
+              className="whitespace-nowrap text-[12px] leading-[normal] tracking-[-0.24px] transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-0 motion-reduce:transition-none"
+              style={{ color: tokens.greyDisabled }}
+            >
+              {w.domain}
+            </span>
+            <span
+              className="absolute right-0 flex rotate-90 opacity-0 transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-100 motion-reduce:transition-none"
+              style={{ color: tokens.grey }}
+              aria-hidden="true"
+            >
+              <Ic name="fig-arrow-out" />
+            </span>
+          </span>
+        </button>
+      ))}
+      {step.meetingIds.map((id) => {
+        const m = meetingById(id);
+        if (!m) return null;
+        // У гостя строка встречи — просто строка: без ховера, стрелки и перехода
+        const Row = readOnly ? "div" : "button";
+        return (
+          <Row
+            key={id}
+            {...(readOnly ? {} : { type: "button" as const, onClick: () => onOpenMeeting?.(id) })}
+            className={readOnly ? "flex w-full items-center gap-[6px] rounded-[2px] px-[8px] py-[8px] text-left" : `group/row flex w-full items-center gap-[6px] rounded-[2px] px-[8px] py-[8px] text-left hover:bg-[#F7F7F8] ${pressableClass} ${focusRingClass}`}
+          >
+            <MeetingThumb thumb={m.thumb} width={26} height={16} radius={2} plain />
+            <span className="min-w-0 flex-1 truncate text-[13px] leading-[normal] tracking-[-0.13px]" style={{ color: tokens.black }}>
+              {m.title}
+            </span>
+            {/* Дата и стрелка перехода стоят на одном месте, как в карточке цитаты: на ховере строки дата гаснет, стрелка проявляется */}
+            <span className="relative flex h-[16px] shrink-0 items-center justify-end">
+              <span
+                className="whitespace-nowrap text-[12px] leading-[normal] tracking-[-0.24px] transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-0 motion-reduce:transition-none"
+                style={{ color: tokens.greyDisabled }}
+              >
+                {formatLongDate(m.date)}
+              </span>
+              {!readOnly && (
+              <span
+                className="absolute right-0 flex rotate-90 opacity-0 transition-opacity duration-[120ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/row:opacity-100 motion-reduce:transition-none"
+                style={{ color: tokens.grey }}
+                aria-hidden="true"
+              >
+                <Ic name="fig-arrow-out" />
+              </span>
+              )}
+            </span>
+          </Row>
+        );
+      })}
     </div>
   );
 }
@@ -2438,10 +2532,11 @@ function AnswerTableView({ table }: { table: AnswerTable }) {
 }
 
 /** Файл как результат ответа (46814:16822): карточка 360 с мини-превью документа, названием, форматом и «Скачать» */
-function FileResultCard({ file, onDownload }: { file: Omit<FileAttachment, "id">; onDownload?: () => void }) {
+export function FileResultCard({ file, onDownload }: { file: Omit<FileAttachment, "id">; onDownload?: () => void }) {
   return (
-    // Карточка режет содержимое сама (overflow-clip в макете): листок превью выше своего слота 50×36 и уходит под нижний край карточки
-    <div className="gc-enter group/filecard flex w-[360px] max-w-full items-center gap-[12px] overflow-hidden rounded-[4px] border bg-white p-[16px]" style={{ borderColor: tokens.border }}>
+    // Карточка режет содержимое сама (overflow-clip в макете): листок превью выше своего слота 50×36 и уходит под нижний край карточки.
+    // Ширина по длине названия: от 360 до ширины колонки ответа; троеточие только когда название не влезает в максимум
+    <div className="gc-enter group/filecard flex w-fit min-w-[360px] max-w-full self-start items-center gap-[12px] overflow-hidden rounded-[4px] border bg-white p-[16px]" style={{ borderColor: tokens.border }}>
       {/* превью: белый листок 48px, повернут на −4°, тень, заголовок 4px и семь серых строчек; слот не режет — только карточка */}
       <span className="relative flex h-[36px] w-[50px] shrink-0 items-start justify-center">
         {/* На ховере карточки листок выравнивается в 0°: мягко, как кладут бумагу на стол */}
@@ -2449,7 +2544,7 @@ function FileResultCard({ file, onDownload }: { file: Omit<FileAttachment, "id">
           className="absolute left-[1px] top-[-2px] flex w-[48px] origin-center -rotate-4 flex-col gap-[3px] rounded-[3px] bg-white p-[6px] transition-[rotate] duration-[220ms] ease-[cubic-bezier(0.23,1,0.32,1)] group-hover/filecard:rotate-0 motion-reduce:transition-none"
           style={{ boxShadow: "0 0 4px rgba(0,0,0,0.2)" }}
         >
-          <span className="whitespace-nowrap text-[4px] font-semibold leading-[normal] tracking-[-0.04px]" style={{ color: "#585E6C" }}>
+          <span className="block w-full overflow-hidden whitespace-nowrap text-[4px] font-semibold leading-[normal] tracking-[-0.04px]" style={{ color: "#585E6C" }}>
             {file.name}
           </span>
           {[36, 32, 35, 33, 35, 32, 33].map((w, i) => (
@@ -2811,12 +2906,19 @@ export function AssistantBlock({
   };
   const mine = generation?.messageId === message.id ? generation.phase : null;
   // Счетчик секунд в статусе «Думаю N сек...» (46450:5960): тикает, пока модель думает
-  const thinkingSince = mine === "thinking" ? generation?.startedAt ?? null : null;
-  const [thinkSeconds, setThinkSeconds] = useState(0);
-  useEffect(() => {
+  // У каждого этапа свой таймер в его строке: «Думаю N сек...» замирает на «Думал N сек», поиск считает с нуля —
+  // «Смотрю встречи N сек...». Итог всей работы — в «Готово · N сек»
+  const searching = mine === "looking" || mine === "analyzing";
+  const thinkingSince = mine === "thinking" || searching ? generation?.startedAt ?? null : null;
+  const [thinkSeconds, setThinkSeconds] = useState(1);
+  // до отрисовки: в новом этапе ни кадра со значением прошлого
+  useLayoutEffect(() => {
     if (thinkingSince === null) return;
-    const tick = () => setThinkSeconds(Math.floor((Date.now() - thinkingSince) / 1000));
-    const t = setInterval(tick, 250);
+    // считаем вверх: «1 сек» с первого мгновения этапа, без строки без цифры и без скачка
+    const tick = () => setThinkSeconds(Math.max(1, Math.ceil((Date.now() - thinkingSince) / 1000)));
+    // новый этап — счет сразу с его нуля, без кадра со значением прошлого этапа
+    tick();
+    const t = setInterval(tick, 100);
     return () => clearInterval(t);
   }, [thinkingSince]);
   // Шиммер на статусах — пока модель думает и смотрит встречи; с первым словом ответа гаснет
@@ -2826,6 +2928,10 @@ export function AssistantBlock({
   const awaitingChoice = message.clarify && message.clarify.chosen === undefined;
   const idle = mine === null && !awaitingChoice;
   const done = idle && message.text.length > 0 && !message.support && !message.limited;
+  // Этапы видны, пока агент думает и ищет; как только пошел ответ — схлопнуты в «Готово · N сек».
+  // Уточнение, вопрос про сервис и лимит показываем как раньше: там нет работы, которую стоит сворачивать
+  const stagesMode = !message.clarify && !message.support && !message.limited;
+  const collapsed = stagesMode && message.thoughtSec !== undefined && (streaming || (mine === null && message.text.length > 0));
   // Аватар ответа: синий персонаж «Авто», один для всех ответов (режимы пользователю не показываем).
   // Живет снаружи колонки слева (left −24: 16 иконка + 8 отступ), поэтому текст статусов и ответа стоит
   // на одной вертикали и не сдвигается, когда аватар исчезает. Едет вниз вслед за этапом: «Думаю...» →
@@ -2850,34 +2956,118 @@ export function AssistantBlock({
   // В уточнении аватар стоит напротив вопроса «Не очень понял…» (46783:9028), а не напротив «Думаю»
   const stage = awaitingChoice ? "clarify" : streaming || (mine === null && message.text.length > 0) ? "answer" : looking ? "step" : "think";
   const blockRef = useRef<HTMLDivElement>(null);
+  // Аватар следует за своей строкой покадрово: экспоненциальное сглаживание к текущей позиции цели.
+  // В отличие от фиксированного перелета, его не надо перезапускать, когда контент под ним едет
+  // (схлопывание этапов, раскрытие списка) — он просто догоняет движущуюся строку без рывков
+  const followRaf = useRef<number | null>(null);
+  // Пока этапы схлопываются, ответ поднимается ровно на место строки шага — аватар на это время стоит,
+  // иначе он сначала уезжал бы к ответу вниз и возвращался обратно вместе с ним
+  const holdUntil = useRef(0);
+  const wasCollapsed = useRef(collapsed);
+  if (collapsed && !wasCollapsed.current) holdUntil.current = (typeof performance !== "undefined" ? performance.now() : 0) + 280;
+  wasCollapsed.current = collapsed;
   useLayoutEffect(() => {
-    const place = (animated: boolean) => {
-      const el = avatarRef.current;
+    const el = avatarRef.current;
+    if (!el) {
+      avatarY.current = null;
+      return;
+    }
+    const targetY = () => {
       const target = stage === "answer" ? answerRef.current : stage === "step" ? stepRef.current : stage === "clarify" ? clarifyRef.current : thinkRef.current;
-      if (!el || !target) return;
-      // offsetTop относительно блока (он relative); +1 — иконка 16 в строке 13/20 на глаз чуть выше центра,
-      // так она стоит на одной оси с текстом статуса
-      const y = target.offsetTop + 1;
-      if (avatarY.current === y) return;
-      const first = avatarY.current === null;
-      const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
-      const from = first ? y : avatarY.current;
-      avatarY.current = y;
-      el.getAnimations().forEach((an) => an.cancel());
-      el.animate([{ transform: `translateY(${from}px)` }, { transform: `translateY(${y}px)` }], {
-        duration: first || reduce || !animated ? 0 : 360,
-        easing: "cubic-bezier(0.32, 0.72, 0, 1)",
-        fill: "forwards",
-      });
+      // offsetTop относительно блока (он relative); +1 — иконка 16 в строке 13/20 на глаз чуть выше центра
+      return target ? target.offsetTop + 1 : null;
     };
-    place(true);
-    // Блок меняет высоту и без смены этапа: раскрыли список встреч, перенеслись строки — аватар едет за своей строкой
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const set = (y: number) => {
+      el.style.transform = `translateY(${y}px)`;
+    };
+    let last = 0;
+    const tick = (now: number) => {
+      const ty = targetY();
+      if (ty === null) {
+        followRaf.current = null;
+        return;
+      }
+      if (avatarY.current === null || reduce) {
+        avatarY.current = ty;
+        set(ty);
+        followRaf.current = null;
+        return;
+      }
+      const dt = Math.min(48, last ? now - last : 16);
+      last = now;
+      if (now < holdUntil.current) {
+        followRaf.current = requestAnimationFrame(tick);
+        return;
+      }
+      // τ = 70мс: стартует быстро и мягко садится, ~350мс на переезд к соседней строке
+      const y = avatarY.current + (ty - avatarY.current) * (1 - Math.exp(-dt / 70));
+      if (Math.abs(ty - y) < 0.4) {
+        avatarY.current = ty;
+        set(ty);
+        followRaf.current = null;
+        return;
+      }
+      avatarY.current = y;
+      set(y);
+      followRaf.current = requestAnimationFrame(tick);
+    };
+    const kick = () => {
+      if (followRaf.current !== null) return;
+      last = 0;
+      followRaf.current = requestAnimationFrame(tick);
+    };
+    // первая постановка — сразу, без кадра задержки
+    if (avatarY.current === null) {
+      const ty = targetY();
+      if (ty !== null) {
+        avatarY.current = ty;
+        set(ty);
+      }
+    }
+    kick();
     const block = blockRef.current;
-    if (!block || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => place(true));
-    ro.observe(block);
-    return () => ro.disconnect();
+    const ro = block && typeof ResizeObserver !== "undefined" ? new ResizeObserver(kick) : null;
+    if (block) ro?.observe(block);
+    return () => {
+      ro?.disconnect();
+      if (followRaf.current !== null) cancelAnimationFrame(followRaf.current);
+      followRaf.current = null;
+    };
   }, [stage, avatarShown, message.step, awaitingChoice]);
+  const reduce = useReducedMotion();
+  const [workOpen, setWorkOpen] = useState(false);
+  // Замершие секунды этапов — ровно то, что пользователь видел в живой строке последним (браузер может придержать
+  // таймер, и посчитанное по часам разошлось бы с увиденным на секунду). Для старых ответов — из сохраненного
+  const shownThought = useRef<number | null>(null);
+  const shownLook = useRef<number | null>(null);
+  if (mine === "thinking") shownThought.current = thinkSeconds;
+  if (searching) shownLook.current = thinkSeconds;
+  const thoughtSeconds = shownThought.current ?? message.thoughtSec;
+  const lookSeconds = message.step ? shownLook.current ?? message.lookSec ?? 3 : 0;
+  const workSeconds = thoughtSeconds !== undefined ? thoughtSeconds + lookSeconds : message.workSec ?? Math.max(1, lookSeconds);
+  const thinkNode = (
+    <span
+      ref={thinkRef}
+      className={`text-[13px] leading-[20px] tracking-[-0.13px] ${mine === "thinking" ? "gc-shimmer-text" : ""}`}
+      style={mine === "thinking" ? shimmerVars(accent) : avatarShown && stage === "think" ? { color: accent } : { color: tokens.grey }}
+    >
+      {mine === "thinking" ? `Думаю ${thinkSeconds} сек...` : thoughtSeconds ? `Думал ${thoughtSeconds} сек` : "Думаю..."}
+    </span>
+  );
+  const stepNode = message.step && !awaitingChoice && (
+    <div ref={stepRef} className="gc-enter w-full" style={looking ? shimmerVars(accent) : undefined}>
+      <StepRow
+        step={message.step}
+        phase={mine === "looking" ? "looking" : mine === "analyzing" ? "analyzing" : "done"}
+        seconds={searching ? thinkSeconds : undefined}
+        accent={avatarShown && stage === "step" ? accent : undefined}
+        web={message.web}
+        onOpenMeeting={onOpenMeeting}
+        onOpenLink={onSupportLink}
+      />
+    </div>
+  );
   return (
     <div ref={blockRef} className="gc-enter group/answer relative flex w-full flex-col items-start gap-[16px]">
       <AnimatePresence>
@@ -2902,15 +3092,54 @@ export function AssistantBlock({
           шиммера, в уточнении и паузах ровным цветом; когда аватар уехал дальше или исчез — серый.
           inline color перебивал бы color: transparent у шиммера, поэтому цвет шиммера через переменные */}
       {message.limited && <LimitCard onUpgrade={onUpgrade} />}
-      {!message.limited && (
-      <span
-        ref={thinkRef}
-        className={`text-[13px] leading-[20px] tracking-[-0.13px] ${mine === "thinking" ? "gc-shimmer-text" : ""}`}
-        style={mine === "thinking" ? shimmerVars(accent) : avatarShown && stage === "think" ? { color: accent } : { color: tokens.grey }}
-      >
-        {mine === "thinking" ? (thinkSeconds > 0 ? `Думаю ${thinkSeconds} сек...` : "Думаю...") : message.thoughtSec ? `Думал ${message.thoughtSec} сек...` : "Думаю..."}
-      </span>
+      {/* Этапы работы. Верхняя строка меняет состояние на месте: «Думал…» перетекает в «Готово · N сек» через легкий
+          блюр — одна точка опоры, глаз читает это как смену статуса, а не перестановку. Строка шага под ней
+          сжимается и растворяется, ответ поднимается вслед. Уточнение и вопрос про сервис — по-старому */}
+      {stagesMode && (
+        <div className="flex w-full flex-col">
+          <div className="grid w-full [&>*]:col-start-1 [&>*]:row-start-1">
+            <AnimatePresence initial={false}>
+              {collapsed ? (
+                <motion.div
+                  key="done"
+                  className="flex"
+                  initial={reduce ? { opacity: 0 } : { opacity: 0, filter: "blur(2px)" }}
+                  animate={{ opacity: 1, filter: "blur(0px)", transition: { duration: 0.2, ease: easeOut } }}
+                >
+                  <WorkToggle seconds={workSeconds} open={workOpen} onToggle={() => setWorkOpen((v) => !v)} />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="think"
+                  className="flex"
+                  exit={reduce ? { opacity: 0, transition: { duration: 0.12 } } : { opacity: 0, filter: "blur(2px)", transition: { duration: 0.16, ease: easeOut } }}
+                >
+                  {thinkNode}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+          <AnimatePresence initial={false}>
+            {!collapsed && stepNode && (
+              <motion.div
+                key="step"
+                className="w-full"
+                exit={
+                  reduce
+                    ? { opacity: 0, transition: { duration: 0.12 } }
+                    : { height: 0, opacity: 0, overflow: "hidden", transition: { height: { duration: 0.24, ease: easeOut }, opacity: { duration: 0.1, ease: easeOut } } }
+                }
+              >
+                <div className="pt-[16px]">{stepNode}</div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          {collapsed && (
+            <WorkPanel open={workOpen} thoughtSec={thoughtSeconds} lookSec={message.step ? lookSeconds : undefined} step={message.step} web={message.web} onOpenMeeting={onOpenMeeting} onOpenLink={onSupportLink} />
+          )}
+        </div>
       )}
+      {!stagesMode && !message.limited && thinkNode}
       {message.clarify && (
         <>
           <p ref={clarifyRef} className="gc-enter text-[13px] leading-[20px] tracking-[-0.13px]" style={{ color: tokens.black }}>
@@ -2927,18 +3156,7 @@ export function AssistantBlock({
           <SupportCards onPick={onSupportLink} />
         </>
       )}
-      {message.step && !awaitingChoice && (
-        <div ref={stepRef} className="gc-enter w-full" style={looking ? shimmerVars(accent) : undefined}>
-          <StepRow
-            step={message.step}
-            phase={mine === "looking" ? "looking" : mine === "analyzing" ? "analyzing" : "done"}
-            accent={avatarShown && stage === "step" ? accent : undefined}
-            web={message.web}
-            onOpenMeeting={onOpenMeeting}
-            onOpenLink={onSupportLink}
-          />
-        </div>
-      )}
+      {!stagesMode && stepNode}
       {(message.text || streaming) && !awaitingChoice && !message.support && (
         <div ref={answerRef} className="flex w-full flex-col gap-[16px]">
           <AnswerText text={message.text} sources={message.sources} web={message.web} onOpenLink={onSupportLink} streaming={streaming} />

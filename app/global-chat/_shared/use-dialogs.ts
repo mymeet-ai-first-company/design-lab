@@ -27,7 +27,7 @@ export type Generation = {
   dialogId: string;
   messageId: string;
   phase: "thinking" | "clarify" | "looking" | "analyzing" | "streaming";
-  /** когда началось думанье — для счетчика секунд в статусе */
+  /** когда агент начал работу над ответом — для счетчика секунд в статусе текущего этапа (у поиска свой отсчет с нуля) */
   startedAt?: number;
 };
 
@@ -219,13 +219,17 @@ export function useDialogs(initialActiveId: string | null = null, initialDialogs
 
   /** Шаг «Смотрю встречи…», затем стрим текста */
   const lookAndStream = useCallback(
-    (dialogId: string, messageId: string, question: string, mode: Mode, context: string[]) => {
+    (dialogId: string, messageId: string, question: string, mode: Mode, context: string[], workStartedAt = Date.now()) => {
       const answer = generateAnswer(question, mode, context);
+      // Секунды этапа считаем вверх с первого мгновения (как в живой строке: «1 сек» сразу) — тогда замершее
+      // значение этапа совпадает с последним, что видел пользователь, а «Готово» — ровно сумма этапов
+      const lookStartedAt = Date.now();
       if (answer.step) {
         patchMessage(dialogId, messageId, { step: answer.step, sources: answer.sources, ...answer.extra });
-        setGeneration({ dialogId, messageId, phase: "looking" });
+        // У каждого этапа свой отсчет: поиск считает секунды с нуля
+        setGeneration({ dialogId, messageId, phase: "looking", startedAt: lookStartedAt });
         // Половину шага ищем встречи («Ищу подходящие встречи»), половину читаем их («Анализирую встречи», 46738:7646)
-        timers.current.analyze = setTimeout(() => setGeneration({ dialogId, messageId, phase: "analyzing" }), LOOK_MS / 2);
+        timers.current.analyze = setTimeout(() => setGeneration({ dialogId, messageId, phase: "analyzing", startedAt: lookStartedAt }), LOOK_MS / 2);
       } else {
         patchMessage(dialogId, messageId, { sources: answer.sources, ...answer.extra });
       }
@@ -233,6 +237,9 @@ export function useDialogs(initialActiveId: string | null = null, initialDialogs
         const words = answer.text.split(/(\s+)/);
         let i = 0;
         const startedAt = Date.now();
+        // С первым словом ответа этапы схлопываются в «Готово · N сек»: N — сумма этапов (думанье + поиск)
+        const lookSec = answer.step ? Math.max(1, Math.ceil((startedAt - lookStartedAt) / 1000)) : 0;
+        patchMessage(dialogId, messageId, { lookSec, workSec: Math.max(1, Math.ceil((lookStartedAt - workStartedAt) / 1000)) + lookSec });
         setGeneration({ dialogId, messageId, phase: "streaming" });
         timers.current.tick = setInterval(() => {
           // Прогресс по времени: фоновые вкладки троттлят таймеры
@@ -294,7 +301,7 @@ export function useDialogs(initialActiveId: string | null = null, initialDialogs
       setGeneration({ dialogId: finalId, messageId: assistantMsg.id, phase: "thinking", startedAt });
       timers.current.think = setTimeout(() => {
         // Думанье закончилось — статус переходит в прошедшее время «Думал N сек...»
-        patchMessage(finalId, assistantMsg.id, { thoughtSec: Math.max(1, Math.round((Date.now() - startedAt) / 1000)) });
+        patchMessage(finalId, assistantMsg.id, { thoughtSec: Math.max(1, Math.ceil((Date.now() - startedAt) / 1000)) });
         if (isProductQuestion(text)) {
           // Вопрос про сервис (46738:7318): вместо ответа по встречам — карточки базы знаний, поддержки и продаж
           patchMessage(finalId, assistantMsg.id, { text: "Это вопрос про сам сервис, а я отвечаю по содержанию ваших встреч: решения, договоренности, задачи. Про подключение, отчеты и тарифы быстрее ответят здесь:", support: true });
@@ -309,7 +316,7 @@ export function useDialogs(initialActiveId: string | null = null, initialDialogs
           setGeneration({ dialogId: finalId, messageId: assistantMsg.id, phase: "clarify" });
           return;
         }
-        lookAndStream(finalId, assistantMsg.id, text, payload.mode, context);
+        lookAndStream(finalId, assistantMsg.id, text, payload.mode, context, startedAt);
       }, THINK_MS);
 
       return dialogId;
