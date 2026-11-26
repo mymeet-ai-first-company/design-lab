@@ -39,8 +39,10 @@ export type SendPayload = {
 };
 
 // Этапы идут друг за другом и не спеша: сначала «Думаю...», потом «Смотрю встречи…», потом текст
-const THINK_MS = 2800;
-const LOOK_MS = 3400;
+// ?slow в адресе — долгая работа для просмотра анимаций ожидания: 15с думает + 15с ищет = 30с
+const SLOW = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("slow");
+const THINK_MS = SLOW ? 15000 : 2800;
+const LOOK_MS = SLOW ? 15000 : 3400;
 const TICK_MS = 26;
 
 // ─────────────────────────────────────────────────────────────────────────────

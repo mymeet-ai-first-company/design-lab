@@ -363,26 +363,44 @@ export function ModeAvatar({
 }
 
 /** Иконка-персонаж 16×16 для ответа в диалоге (46377:6013): тот же персонаж без плашки, тело цветом,
- *  глаза белые. thinking — сценка ожидания: медленное дыхание тела, блуждающий взгляд и редкое моргание, по кругу */
+ *  глаза белые. thinking — сценка ожидания: дыхание, блуждающий взгляд и моргание; если думанье затянулось,
+ *  тело начинает делать циклы «оборот — пауза», а глаза встают в центр и моргают в паузе */
 export function ModeGlyph({ mode, thinking = false }: { mode: Mode; thinking?: boolean }) {
   const m = modeById(mode);
   const art = MODE_AVATAR_ART[mode];
   const { w, h } = MODE_GLYPH_16[mode];
   const [, , vw] = art.viewBox.split(" ").map(Number);
   const bodyRef = useRef<SVGGElement>(null);
+  const spinRef = useRef<SVGGElement>(null);
   const eyesRef = useRef<SVGGElement>(null);
   useEffect(() => {
     const body = bodyRef.current;
+    const spin = spinRef.current;
     const eyes = eyesRef.current;
-    if (!body || !eyes) return;
+    if (!body || !spin || !eyes) return;
     const out = "cubic-bezier(0.23, 1, 0.32, 1)";
     const stop = () => {
-      // Доезжаем из текущей позы в покой, а не обрываем на полукадре
+      // Дыхание и взгляд доезжают из текущей позы в покой, а не обрываются на полукадре
       [body, eyes].forEach((el) => {
         const from = getComputedStyle(el).transform;
         el.getAnimations().forEach((an) => an.cancel());
         if (from && from !== "none") el.animate([{ transform: from }, { transform: "none" }], { duration: 320, easing: out });
       });
+      // Если ответ пришел посреди оборота — не обрываем, а докручиваем круг до конца
+      // торможение уже идет (stop зовется и при очистке эффекта, и в новом эффекте) — не перезапускаем
+      if (spin.getAnimations().some((an) => an.id === "settle")) return;
+      const mtx = new DOMMatrix(getComputedStyle(spin).transform === "none" ? undefined : getComputedStyle(spin).transform);
+      const angle = ((Math.atan2(mtx.b, mtx.a) * 180) / Math.PI + 360) % 360;
+      spin.getAnimations().forEach((an) => an.cancel());
+      if (angle > 0.5) {
+        // оборот не обрываем: мягко докручиваем до конца круга, форма встает ровно как была
+        spin.animate([{ transform: `rotate(${angle}deg)` }, { transform: "rotate(360deg)" }], {
+          duration: Math.max(260, ((360 - angle) / 360) * 900),
+          easing: out,
+          fill: "forwards",
+          id: "settle",
+        });
+      }
     };
     if (!thinking || matchMedia("(prefers-reduced-motion: reduce)").matches) {
       stop();
@@ -411,13 +429,51 @@ export function ModeGlyph({ mode, thinking = false }: { mode: Mode; thinking?: b
       ],
       { duration: 5600, iterations: Infinity, easing: "linear" },
     );
-    return stop;
+    // Долгое думанье: через 1.2с тело начинает работать циклами — полный оборот по часовой за 1.2с
+    // (плавный разгон и плавное торможение), потом пауза 1с, и снова. Полный оборот возвращает форму ровно
+    // в исходное положение. Глаза отвязаны от кружения: встают строго в центр и моргают в паузе
+    const SPIN = 1200;
+    const REST = 1000;
+    const CYCLE = SPIN + REST;
+    const inOut = "cubic-bezier(0.65, 0, 0.35, 1)";
+    const startSpin = setTimeout(() => {
+      // глаза — в центр из текущей позы, потом только моргание в паузе каждого второго цикла
+      const from = getComputedStyle(eyes).transform;
+      eyes.getAnimations().forEach((an) => an.cancel());
+      eyes.animate([{ transform: from && from !== "none" ? from : "none" }, { transform: "none" }], { duration: 260, easing: out });
+      const blinkAt = (CYCLE + SPIN + REST / 2) / (CYCLE * 2);
+      eyes.animate(
+        [
+          { transform: "none" },
+          { transform: "none", offset: blinkAt - 0.02 },
+          { transform: "scaleY(0.1)", offset: blinkAt },
+          { transform: "none", offset: blinkAt + 0.02 },
+          { transform: "none" },
+        ],
+        { duration: CYCLE * 2, iterations: Infinity },
+      );
+      spin.animate(
+        [
+          { transform: "rotate(0deg)", easing: inOut },
+          { transform: "rotate(360deg)", offset: SPIN / CYCLE },
+          { transform: "rotate(360deg)" },
+        ],
+        { duration: CYCLE, iterations: Infinity },
+      );
+    }, 1200);
+    return () => {
+      clearTimeout(startSpin);
+      stop();
+    };
   }, [thinking, vw, mode]);
   return (
     <span className="flex h-[16px] w-[16px] shrink-0 items-center justify-center" aria-hidden="true">
       <svg width={w} height={h} viewBox={art.viewBox} fill="none" xmlns="http://www.w3.org/2000/svg" className="block overflow-visible" overflow="visible">
         <g ref={bodyRef} style={{ transformBox: "fill-box", transformOrigin: "center" }}>
-          <path d={art.body} fill={m.color} />
+          {/* вращается только тело; глаза — соседний слой и остаются ровными */}
+          <g ref={spinRef} style={{ transformBox: "fill-box", transformOrigin: "center" }}>
+            <path d={art.body} fill={m.color} />
+          </g>
           <g ref={eyesRef} style={{ transformBox: "fill-box", transformOrigin: "center" }}>
             {art.eyes.map((d, i) => (
               <g key={i} style={{ transformBox: "fill-box", transformOrigin: "center", transform: eyeTransform(art.eyeTransform, i) }}>
@@ -430,7 +486,6 @@ export function ModeGlyph({ mode, thinking = false }: { mode: Mode; thinking?: b
     </span>
   );
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Каретка в поле ввода → точка во viewport, чтобы аватар мог за ней следить
@@ -2911,16 +2966,24 @@ export function AssistantBlock({
   const searching = mine === "looking" || mine === "analyzing";
   const thinkingSince = mine === "thinking" || searching ? generation?.startedAt ?? null : null;
   const [thinkSeconds, setThinkSeconds] = useState(1);
+  // Замершие секунды этапов — ровно то, что пользователь видел в живой строке последним (браузер может придержать
+  // таймер, и посчитанное по часам разошлось бы с увиденным на секунду). Пишутся тем же тиком, что и живой счетчик
+  const [stageSeconds, setStageSeconds] = useState<{ think?: number; look?: number }>({});
+  const stageKind = mine === "thinking" ? "think" : searching ? "look" : null;
   // до отрисовки: в новом этапе ни кадра со значением прошлого
   useLayoutEffect(() => {
-    if (thinkingSince === null) return;
+    if (thinkingSince === null || stageKind === null) return;
     // считаем вверх: «1 сек» с первого мгновения этапа, без строки без цифры и без скачка
-    const tick = () => setThinkSeconds(Math.max(1, Math.ceil((Date.now() - thinkingSince) / 1000)));
+    const tick = () => {
+      const v = Math.max(1, Math.ceil((Date.now() - thinkingSince) / 1000));
+      setThinkSeconds(v);
+      setStageSeconds((prev) => (prev[stageKind] === v ? prev : { ...prev, [stageKind]: v }));
+    };
     // новый этап — счет сразу с его нуля, без кадра со значением прошлого этапа
     tick();
     const t = setInterval(tick, 100);
     return () => clearInterval(t);
-  }, [thinkingSince]);
+  }, [thinkingSince, stageKind]);
   // Шиммер на статусах — пока модель думает и смотрит встречи; с первым словом ответа гаснет
   const generating = mine === "thinking" || mine === "looking" || mine === "analyzing";
   const looking = mine === "looking" || mine === "analyzing";
@@ -2964,8 +3027,10 @@ export function AssistantBlock({
   // иначе он сначала уезжал бы к ответу вниз и возвращался обратно вместе с ним
   const holdUntil = useRef(0);
   const wasCollapsed = useRef(collapsed);
-  if (collapsed && !wasCollapsed.current) holdUntil.current = (typeof performance !== "undefined" ? performance.now() : 0) + 280;
-  wasCollapsed.current = collapsed;
+  useLayoutEffect(() => {
+    if (collapsed && !wasCollapsed.current) holdUntil.current = performance.now() + 280;
+    wasCollapsed.current = collapsed;
+  }, [collapsed]);
   useLayoutEffect(() => {
     const el = avatarRef.current;
     if (!el) {
@@ -2994,7 +3059,8 @@ export function AssistantBlock({
         followRaf.current = null;
         return;
       }
-      const dt = Math.min(48, last ? now - last : 16);
+      // реальный шаг кадра (до 100мс): при редких кадрах аватар не отстает от строки
+      const dt = Math.min(100, last ? now - last : 16);
       last = now;
       if (now < holdUntil.current) {
         followRaf.current = requestAnimationFrame(tick);
@@ -3037,14 +3103,9 @@ export function AssistantBlock({
   }, [stage, avatarShown, message.step, awaitingChoice]);
   const reduce = useReducedMotion();
   const [workOpen, setWorkOpen] = useState(false);
-  // Замершие секунды этапов — ровно то, что пользователь видел в живой строке последним (браузер может придержать
-  // таймер, и посчитанное по часам разошлось бы с увиденным на секунду). Для старых ответов — из сохраненного
-  const shownThought = useRef<number | null>(null);
-  const shownLook = useRef<number | null>(null);
-  if (mine === "thinking") shownThought.current = thinkSeconds;
-  if (searching) shownLook.current = thinkSeconds;
-  const thoughtSeconds = shownThought.current ?? message.thoughtSec;
-  const lookSeconds = message.step ? shownLook.current ?? message.lookSec ?? 3 : 0;
+  // для старых ответов (после перезагрузки) — из сохраненного
+  const thoughtSeconds = stageSeconds.think ?? message.thoughtSec;
+  const lookSeconds = message.step ? stageSeconds.look ?? message.lookSec ?? 3 : 0;
   const workSeconds = thoughtSeconds !== undefined ? thoughtSeconds + lookSeconds : message.workSec ?? Math.max(1, lookSeconds);
   const thinkNode = (
     <span
